@@ -7,7 +7,7 @@ Hardware : Raspberry Pi 4B  |  push button on GPIO  |  camera  |  USB speaker/mi
 import os
 import time
 import threading
-import cv2
+import io
 from PIL import Image
 import requests
 import google.generativeai as genai
@@ -17,7 +17,6 @@ load_dotenv()
 
 # ── User-configurable settings ────────────────────────────────────────────────
 BUTTON_PIN     = 17          # BCM GPIO pin the button is wired to (other leg → GND)
-CAMERA_INDEX   = 0           # /dev/video0; try 1 if you have multiple cameras
 GEMINI_MODEL   = "gemini-3-flash-preview"
 VISION_PROMPT  = (
     "You are assisting a visually impaired person. "
@@ -70,19 +69,16 @@ def push_to_browser(text: str):
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 
 def capture_image() -> Image.Image | None:
-    """Open camera, grab one frame, return it as a PIL Image (or None on error)."""
-    cam = cv2.VideoCapture(CAMERA_INDEX)
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    time.sleep(0.4)                          # camera warm-up
-    ok, frame = cam.read()
-    cam.release()
-    if not ok:
-        print("[ERROR] Camera did not return a frame.")
+    """Fetch one JPEG frame from the server's /capture endpoint."""
+    try:
+        resp = requests.get(f"{SERVER_URL}/capture", timeout=10)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        print("[INFO] Image captured via server.")
+        return image
+    except Exception as exc:
+        print(f"[ERROR] Could not fetch image from server: {exc}")
         return None
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    print("[INFO] Image captured successfully.")
-    return Image.fromarray(rgb)
 
 
 def ask_gemini(model, pil_image: Image.Image) -> str:

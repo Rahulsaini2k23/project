@@ -137,6 +137,18 @@ def video_feed():
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
 
+@app.route('/capture')
+def capture():
+    """Return a single JPEG frame from the camera (used by button_vision.py)."""
+    cam = get_camera()
+    ok, frame = cam.read()
+    if not ok:
+        return Response("Camera error", status=503)
+    ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ret:
+        return Response("Encode error", status=500)
+    return Response(buf.tobytes(), mimetype='image/jpeg')
+
 def resolve_destination(spoken_text):
     query = spoken_text.lower().strip()
     filler = ["take me to", "go to", "navigate to", "i want to go to",
