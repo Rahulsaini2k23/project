@@ -18,7 +18,7 @@ load_dotenv()
 # ── User-configurable settings ────────────────────────────────────────────────
 BUTTON_PIN     = 17          # BCM GPIO pin the button is wired to (other leg → GND)
 CAMERA_INDEX   = 0           # /dev/video0; try 1 if you have multiple cameras
-GEMINI_MODEL   = "gemini-2.0-flash"
+GEMINI_MODEL   = "gemini-3-flash-preview"
 VISION_PROMPT  = (
     "You are assisting a visually impaired person. "
     "Look at this image and describe what you see clearly and concisely "
@@ -118,30 +118,26 @@ def run_pipeline(model):
 
 # ── GPIO / input handling ─────────────────────────────────────────────────────
 
-def _make_gpio_callback(model):
-    def _callback(channel):
-        threading.Thread(
-            target=run_pipeline, args=(model,), daemon=True
-        ).start()
-    return _callback
-
-
-def setup_gpio(model):
+def poll_button(model):
+    """Poll the button pin every 50 ms — avoids add_event_detect kernel bugs."""
     GPIO.setmode(GPIO.BCM)
-    # Clear any leftover state from a previous (unclean) run
-    try:
-        GPIO.remove_event_detect(BUTTON_PIN)
-    except Exception:
-        pass
-    GPIO.cleanup(BUTTON_PIN)
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.add_event_detect(
-        BUTTON_PIN,
-        GPIO.FALLING,
-        callback=_make_gpio_callback(model),
-        bouncetime=600,
-    )
-    print(f"[GPIO] Ready. Listening on BCM pin {BUTTON_PIN}. Press button to capture.")
+    print(f"[GPIO] Polling BCM pin {BUTTON_PIN}. Press button to capture.")
+
+    last_state = GPIO.HIGH
+    debounce_until = 0.0
+
+    while True:
+        state = GPIO.input(BUTTON_PIN)
+        now = time.monotonic()
+        # Detect falling edge (HIGH → LOW) outside debounce window
+        if last_state == GPIO.HIGH and state == GPIO.LOW and now >= debounce_until:
+            debounce_until = now + 0.6          # 600 ms debounce
+            threading.Thread(
+                target=run_pipeline, args=(model,), daemon=True
+            ).start()
+        last_state = state
+        time.sleep(0.05)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -150,11 +146,8 @@ def main():
     model = _init_gemini()
 
     if _GPIO_AVAILABLE:
-        setup_gpio(model)
-        print("[INFO] Running. Press Ctrl+C to exit.")
         try:
-            while True:
-                time.sleep(0.1)
+            poll_button(model)          # blocks here; exits on Ctrl+C
         except KeyboardInterrupt:
             print("\n[INFO] Shutting down.")
         finally:
