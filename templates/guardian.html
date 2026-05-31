@@ -16,6 +16,7 @@
         <div>
             <div id="title">Guardian Tracker</div>
             <div id="subtitle">Blind Navigation System — Live Monitor</div>
+<button id="feed-btn" onclick="toggleFeed()">📷 Show Live Feed</button>
         </div>
     </div>
     <div id="status-badge" class="badge-waiting">Connecting...</div>
@@ -23,7 +24,7 @@
 
 <div id="info-bar">
     <div class="info-card">
-        <div class="info-label">GPS STATUS</div>
+                                                                                               <div class="info-label">GPS STATUS</div>
         <div class="info-value" id="gps-status">—</div>
     </div>
     <div class="info-card">
@@ -45,7 +46,11 @@
 </div>
 
 <div id="map"></div>
-
+<div id="feed-container" style="display:none; text-align:center; background:#000; padding:8px;">
+    <img id="live-feed" src="/video_feed" 
+         style="max-width:100%; max-height:360px; border-radius:8px;"
+         alt="Live camera feed">
+</div>
 <div id="footer">
     <span>Updates every 5 seconds</span>
     <span id="update-counter">Next update in <b id="countdown">5</b>s</span>
@@ -87,6 +92,25 @@ function updateMarker(lat, lon) {
     if (firstFix) {
         map.setView([lat, lon], 18);
         firstFix = false;
+    }
+}
+
+let feedActive = false;
+
+function toggleFeed() {
+    feedActive = !feedActive;
+    const container = document.getElementById('feed-container');
+    const btn = document.getElementById('feed-btn');
+    const img = document.getElementById('live-feed');
+
+    if (feedActive) {
+        container.style.display = 'block';
+        img.src = '/video_feed';          // (re)starts the stream
+        btn.textContent = '⏹ Hide Feed';
+    } else {
+        img.src = '';                      // stops the HTTP request, freeing the camera
+        container.style.display = 'none';
+        btn.textContent = '📷 Show Live Feed';
     }
 }
 

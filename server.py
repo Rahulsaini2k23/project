@@ -2,9 +2,17 @@ from flask import Flask, render_template, jsonify, request
 from datetime import datetime
 import subprocess
 from gps_reader import start_gps, get_current_gps
+import cv2
+from flask import Response
+
+
 
 app = Flask(__name__)
 start_gps()
+
+# Add after existing globals (after start_gps())
+camera = None
+
 
 DESTINATIONS = {
     "main building":                          (31.395803, 75.536444),
@@ -87,6 +95,33 @@ DESTINATIONS = {
     "main ground":                            (31.396647680131572, 75.53229887191691),
     "mbh ground":                             (31.39836300081259, 75.53480121730836),
 }
+
+def get_camera():
+    global camera
+    if camera is None:
+        camera = cv2.VideoCapture(0)  # 0 = first webcam; try /dev/video0 if this fails
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    return camera
+
+def generate_frames():
+    cam = get_camera()
+    while True:
+        success, frame = cam.read()
+        if not success:
+            break
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if not ret:
+            continue
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(
+        generate_frames(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
 
 def resolve_destination(spoken_text):
     query = spoken_text.lower().strip()
