@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guardian — Live Tracker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='guardian.css') }}">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+
+<div id="header">
+    <div id="header-left">
+        <div id="logo">🛡️</div>
+        <div>
+            <div id="title">Guardian Tracker</div>
+            <div id="subtitle">Blind Navigation System — Live Monitor</div>
+        </div>
+    </div>
+    <div id="status-badge" class="badge-waiting">Connecting...</div>
+</div>
+
+<div id="info-bar">
+    <div class="info-card">
+        <div class="info-label">GPS STATUS</div>
+        <div class="info-value" id="gps-status">—</div>
+    </div>
+    <div class="info-card">
+        <div class="info-label">SATELLITES</div>
+        <div class="info-value" id="satellites">—</div>
+    </div>
+    <div class="info-card">
+        <div class="info-label">BATTERY</div>
+        <div class="info-value" id="battery">—</div>
+    </div>
+    <div class="info-card">
+        <div class="info-label">LAST UPDATE</div>
+        <div class="info-value" id="timestamp">—</div>
+    </div>
+    <div class="info-card">
+        <div class="info-label">COORDINATES</div>
+        <div class="info-value" id="coordinates">—</div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<div id="footer">
+    <span>Updates every 5 seconds</span>
+    <span id="update-counter">Next update in <b id="countdown">5</b>s</span>
+    <span>NIT Jalandhar Blind Nav System</span>
+</div>
+
+<script>
+const DEFAULT_LAT = 31.3960;
+const DEFAULT_LON = 75.5358;
+const UPDATE_INTERVAL = 5;
+
+const map = L.map('map').setView([DEFAULT_LAT, DEFAULT_LON], 17);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+}).addTo(map);
+
+const blindIcon = L.divIcon({
+    html: `<div class="marker-pin">
+                <div class="marker-pulse"></div>
+                <div class="marker-icon">🧑‍🦯</div>
+           </div>`,
+    className: '',
+    iconSize: [50, 50],
+    iconAnchor: [25, 25]
+});
+
+let marker   = null;
+let firstFix = true;
+let countdown = UPDATE_INTERVAL;
+
+function updateMarker(lat, lon) {
+    if (!marker) {
+        marker = L.marker([lat, lon], { icon: blindIcon }).addTo(map);
+    } else {
+        marker.setLatLng([lat, lon]);
+    }
+    if (firstFix) {
+        map.setView([lat, lon], 18);
+        firstFix = false;
+    }
+}
+
+function fetchLocation() {
+    fetch('/guardian/location')
+    .then(res => res.json())
+    .then(data => {
+        const badge = document.getElementById('status-badge');
+
+        if (data.fix && data.latitude && data.longitude) {
+            badge.textContent = '● Live';
+            badge.className   = 'badge-live';
+            updateMarker(data.latitude, data.longitude);
+            document.getElementById('gps-status').textContent  = '✅ Fix Active';
+            document.getElementById('satellites').textContent  = data.satellites ? `${data.satellites} sats` : '—';
+            document.getElementById('coordinates').textContent = `${data.latitude.toFixed(6)}, ${data.longitude.toFixed(6)}`;
+        } else {
+            badge.textContent = '⏳ No Fix';
+            badge.className   = 'badge-waiting';
+            document.getElementById('gps-status').textContent  = '⏳ Searching...';
+            document.getElementById('coordinates').textContent = 'Waiting for GPS';
+        }
+
+        const battEl = document.getElementById('battery');
+        if (data.battery !== null && data.battery !== undefined) {
+            const pct  = data.battery;
+            const icon = pct > 60 ? '🔋' : pct > 20 ? '🪫' : '⚠️';
+            battEl.textContent = `${icon} ${pct}%`;
+        } else {
+            battEl.textContent = 'N/A';
+        }
+
+        document.getElementById('timestamp').textContent =
+            data.timestamp ? data.timestamp.split(' ')[1] : '—';
+    })
+    .catch(err => {
+        console.error('[GUARDIAN] Fetch error:', err);
+        const badge = document.getElementById('status-badge');
+        badge.textContent = '⚠️ Offline';
+        badge.className   = 'badge-offline';
+    });
+}
+
+function startCountdown() {
+    countdown = UPDATE_INTERVAL;
+    document.getElementById('countdown').textContent = countdown;
+    const timer = setInterval(() => {
+        countdown--;
+        document.getElementById('countdown').textContent = countdown;
+        if (countdown <= 0) {
+            clearInterval(timer);
+            fetchLocation();
+            startCountdown();
+        }
+    }, 1000);
+}
+
+fetchLocation();
+startCountdown();
+</script>
+</body>
+</html>

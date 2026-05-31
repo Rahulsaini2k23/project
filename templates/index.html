@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Blind Navigation System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        #launchOverlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: #1a1a2e;
+            z-index: 999;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        #launchOverlay.active {
+            display: flex;
+        }
+        #launchOverlay .big-text {
+            color: #00ff88;
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 20px;
+            padding: 0 20px;
+        }
+        #launchOverlay .tap-hint {
+            color: #ffffff;
+            font-size: 1.3em;
+            animation: pulse 1.2s infinite;
+        }
+        @keyframes pulse {
+            0%   { opacity: 1; }
+            50%  { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body onclick="handleTap()">
+
+<div id="container">
+    <div id="micButton">🎤</div>
+    <div id="status">Tap Anywhere And Speak</div>
+</div>
+
+<!-- Full screen launch overlay — appears after route is ready -->
+<div id="launchOverlay">
+    <div class="big-text" id="launchText">Route Ready</div>
+    <div class="tap-hint">👆 TAP ANYWHERE TO START NAVIGATION</div>
+</div>
+
+<script>
+let listening   = false;
+let pendingUrl  = null;
+let routeReady  = false;
+
+function speak(message) {
+    return new Promise((resolve) => {
+        window.speechSynthesis.cancel();
+        const utterance   = new SpeechSynthesisUtterance(message);
+        utterance.rate    = 0.92;
+        utterance.pitch   = 1.0;
+        utterance.lang    = "en-IN";
+        const words       = message.split(" ").length;
+        const duration    = Math.max(2500, words * 420);
+        const timer       = setTimeout(resolve, duration);
+        utterance.onend   = () => { clearTimeout(timer); resolve(); };
+        utterance.onerror = () => { clearTimeout(timer); resolve(); };
+        window.speechSynthesis.speak(utterance);
+    });
+}
+
+// This runs on EVERY tap anywhere on screen
+function handleTap() {
+    if (routeReady && pendingUrl) {
+        // ── TAP 2: Route is ready → launch Maps APP ──
+        // This is a direct user gesture → Android App Links fire
+        // Google Maps APP opens straight into navigation ✅
+        window.location.href = pendingUrl;
+        return;
+    }
+    // ── TAP 1: Start voice recognition ──
+    startRecognition();
+}
+
+async function handleRouteResponse(data, destinationName) {
+    const statusEl = document.getElementById("status");
+    if (data.status === "success") {
+        const matchedName = data.matched_name || destinationName;
+        // Store URL — will launch on next tap
+        pendingUrl = data.maps_url;
+        routeReady = true;
+        // Show full screen tap overlay
+        document.getElementById("launchText").innerHTML =
+            "Navigate to<br>" + matchedName.toUpperCase();
+        document.getElementById("launchOverlay").classList.add("active");
+        // Tell user to tap
+        await speak("Route to " + matchedName + " is ready. Tap anywhere to start navigation now.");
+    } else if (data.status === "not_found") {
+        statusEl.innerHTML = "Not found:<br><b>" + destinationName + "</b><br><small>Tap and try again</small>";
+        await speak("Sorry, I could not find " + destinationName + " on campus. Please tap and try again.");
+    } else {
+        statusEl.innerHTML = "Something went wrong.<br><small>Tap to try again</small>";
+        await speak("Something went wrong. Please tap and try again.");
+    }
+}
+
+async function startRecognition() {
+    if (listening) return;
+    // Reset state
+    routeReady = false;
+    pendingUrl = null;
+    document.getElementById("launchOverlay").classList.remove("active");
+    listening = true;
+    const micBtn   = document.getElementById("micButton");
+    const statusEl = document.getElementById("status");
+    micBtn.classList.add("listening");
+    statusEl.innerHTML = "Listening...";
+    if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+        statusEl.innerHTML = "Speech not supported.<br><small>Use Chrome on Android</small>";
+        await speak("Speech recognition not supported. Please use Chrome browser.");
+        listening = false;
+        micBtn.classList.remove("listening");
+        return;
+    }
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition       = new SpeechRecognition();
+    recognition.lang            = "en-IN";
+    recognition.interimResults  = false;
+    recognition.maxAlternatives = 5;
+    recognition.continuous      = false;
+    recognition.start();
+    recognition.onresult = async function(event) {
+        let destination = "";
+        let bestConf    = 0;
+        for (let i = 0; i < event.results[0].length; i++) {
+            if (event.results[0][i].confidence > bestConf) {
+                bestConf    = event.results[0][i].confidence;
+                destination = event.results[0][i].transcript;
+            }
+        }
+        destination = destination.trim();
+        console.log("[VOICE] Heard:", destination, "| Conf:", bestConf.toFixed(2));
+        statusEl.innerHTML = "You said:<br><b>" + destination + "</b>";
+        await speak("You said " + destination + ". Calculating route.");
+        try {
+            const response = await fetch("/destination", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ destination: destination })
+            });
+            if (!response.ok) throw new Error("Server error: " + response.status);
+            const data = await response.json();
+            console.log("[SERVER]", data);
+            await handleRouteResponse(data, destination);
+        } catch (error) {
+            console.error("[FETCH ERROR]", error);
+            statusEl.innerHTML = "Connection error.<br><small>Is server running?</small>";
+            await speak("Could not connect to server. Please try again.");
+        }
+    };
+    recognition.onerror = async function(event) {
+        console.error("[SPEECH ERROR]", event.error);
+        let msg = "Microphone error. Please tap and try again.";
+        if (event.error === "no-speech")   msg = "No speech detected. Please tap and speak clearly.";
+        if (event.error === "not-allowed") msg = "Microphone permission denied. Please allow microphone access.";
+        statusEl.innerHTML = "Error: " + event.error + "<br><small>Tap to retry</small>";
+        await speak(msg);
+        listening = false;
+        micBtn.classList.remove("listening");
+    };
+    recognition.onend = function() {
+        listening = false;
+        micBtn.classList.remove("listening");
+        if (statusEl.innerHTML === "Listening...") {
+            statusEl.innerHTML = "No speech heard.<br><small>Tap to try again</small>";
+        }
+    };
+}
+</script>
+</body>
+</html>
