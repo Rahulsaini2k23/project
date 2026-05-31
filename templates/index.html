@@ -54,9 +54,27 @@
 </div>
 
 <script>
-let listening   = false;
-let pendingUrl  = null;
-let routeReady  = false;
+let listening        = false;
+let pendingUrl       = null;
+let routeReady       = false;
+let welcomeSpoken    = false;
+
+const WELCOME_MSG = "Welcome to Blind Navigation System. Tap anywhere and say your destination.";
+
+function tryAutoWelcome() {
+    // Browsers allow speechSynthesis on page load only if the tab was
+    // opened by a user gesture (e.g. tapping a link on Android Chrome).
+    // We try immediately; if it fires, great. If blocked, the first tap
+    // will speak it instead.
+    if (welcomeSpoken) return;
+    const u = new SpeechSynthesisUtterance(WELCOME_MSG);
+    u.lang  = "en-IN";
+    u.rate  = 0.92;
+    u.onstart = () => { welcomeSpoken = true; };
+    window.speechSynthesis.speak(u);
+}
+
+window.addEventListener("load", tryAutoWelcome);
 
 function speak(message) {
     return new Promise((resolve) => {
@@ -75,7 +93,7 @@ function speak(message) {
 }
 
 // This runs on EVERY tap anywhere on screen
-function handleTap() {
+async function handleTap() {
     if (routeReady && pendingUrl) {
         // ── TAP 2: Route is ready → launch Maps APP ──
         // This is a direct user gesture → Android App Links fire
@@ -83,7 +101,11 @@ function handleTap() {
         window.location.href = pendingUrl;
         return;
     }
-    // ── TAP 1: Start voice recognition ──
+    // ── TAP 1: speak welcome first (if autoplay was blocked), then listen ──
+    if (!welcomeSpoken) {
+        welcomeSpoken = true;
+        await speak(WELCOME_MSG);
+    }
     startRecognition();
 }
 
@@ -181,6 +203,29 @@ async function startRecognition() {
         }
     };
 }
+
+// ── Vision SSE — receives Gemini descriptions from the RPi button ─────────────
+(function connectVisionStream() {
+    const es = new EventSource("/vision/stream");
+
+    es.onmessage = async function(event) {
+        try {
+            const { text } = JSON.parse(event.data);
+            if (text) {
+                document.getElementById("status").innerHTML =
+                    "<small>" + text + "</small>";
+                await speak(text);
+            }
+        } catch (_) {}
+    };
+
+    es.onerror = function() {
+        // Auto-reconnect after 3 s if the connection drops
+        es.close();
+        setTimeout(connectVisionStream, 3000);
+    };
+})();
+// ─────────────────────────────────────────────────────────────────────────────
 </script>
 </body>
 </html>
