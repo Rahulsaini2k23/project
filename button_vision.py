@@ -128,12 +128,18 @@ def _make_gpio_callback(model):
 
 def setup_gpio(model):
     GPIO.setmode(GPIO.BCM)
+    # Clear any leftover state from a previous (unclean) run
+    try:
+        GPIO.remove_event_detect(BUTTON_PIN)
+    except Exception:
+        pass
+    GPIO.cleanup(BUTTON_PIN)
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.add_event_detect(
         BUTTON_PIN,
         GPIO.FALLING,
         callback=_make_gpio_callback(model),
-        bouncetime=600,           # ms — ignore bounces shorter than this
+        bouncetime=600,
     )
     print(f"[GPIO] Ready. Listening on BCM pin {BUTTON_PIN}. Press button to capture.")
 
