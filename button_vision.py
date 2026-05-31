@@ -7,10 +7,9 @@ Hardware : Raspberry Pi 4B  |  push button on GPIO  |  camera  |  USB speaker/mi
 import os
 import time
 import threading
-import cv2
+import io
 from PIL import Image
-from gtts import gTTS
-import pygame
+import requests
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -18,20 +17,15 @@ load_dotenv()
 
 # ── User-configurable settings ────────────────────────────────────────────────
 BUTTON_PIN     = 17          # BCM GPIO pin the button is wired to (other leg → GND)
-CAMERA_INDEX   = 0           # /dev/video0; try 1 if you have multiple cameras
 GEMINI_MODEL   = "gemini-3-flash-preview"
 VISION_PROMPT  = (
     "You are assisting a visually impaired person. "
     "Look at this image and describe what you see clearly and concisely "
     "in two or three sentences. Focus on people, objects, text, and surroundings."
 )
-TTS_LANG       = "en"
-TMP_AUDIO_FILE = "/tmp/vision_reply.mp3"
 
-# ALSA device for playback (None = system default).
-# Run `aplay -l` on the RPi to list devices.
-# Example for a USB speaker at card 1: "plughw:1,0"
-AUDIO_DEVICE   = None
+# Flask server URL — Gemini result is POSTed here so the browser speaks it.
+SERVER_URL     = "http://localhost:5000"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── GPIO import (gracefully degrades to keyboard-Enter on non-RPi machines) ──
@@ -59,30 +53,32 @@ def _init_gemini():
     return genai.GenerativeModel(GEMINI_MODEL)
 
 
-def _init_audio():
-    """Initialise pygame mixer, optionally targeting a specific ALSA device."""
-    if AUDIO_DEVICE:
-        os.environ["SDL_AUDIODEV"] = AUDIO_DEVICE
-    pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=1024)
-    pygame.mixer.init()
+def push_to_browser(text: str):
+    """POST Gemini text to Flask → SSE → browser speak()."""
+    try:
+        requests.post(
+            f"{SERVER_URL}/vision/result",
+            json={"text": text},
+            timeout=5,
+        )
+        print("[PUSH] Sent to browser.")
+    except Exception as exc:
+        print(f"[PUSH ERROR] Could not reach server: {exc}")
 
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 
 def capture_image() -> Image.Image | None:
-    """Open camera, grab one frame, return it as a PIL Image (or None on error)."""
-    cam = cv2.VideoCapture(CAMERA_INDEX)
-    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    time.sleep(0.4)                          # camera warm-up
-    ok, frame = cam.read()
-    cam.release()
-    if not ok:
-        print("[ERROR] Camera did not return a frame.")
+    """Fetch one JPEG frame from the server's /capture endpoint."""
+    try:
+        resp = requests.get(f"{SERVER_URL}/capture", timeout=10)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        print("[INFO] Image captured via server.")
+        return image
+    except Exception as exc:
+        print(f"[ERROR] Could not fetch image from server: {exc}")
         return None
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    print("[INFO] Image captured successfully.")
-    return Image.fromarray(rgb)
 
 
 def ask_gemini(model, pil_image: Image.Image) -> str:
@@ -91,81 +87,67 @@ def ask_gemini(model, pil_image: Image.Image) -> str:
     return response.text.strip()
 
 
-def speak(text: str):
-    """Convert text → MP3 via gTTS, then play through pygame."""
-    print(f"[TTS] {text}")
-    tts = gTTS(text=text, lang=TTS_LANG, slow=False)
-    tts.save(TMP_AUDIO_FILE)
-    pygame.mixer.music.load(TMP_AUDIO_FILE)
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        time.sleep(0.05)
-
-
 def run_pipeline(model):
     """Full button-press pipeline — runs in a background thread."""
     if not _processing_lock.acquire(blocking=False):
         print("[SKIP] Already handling a previous press — ignoring.")
         return
     try:
-        speak("Capturing image, please wait.")
+        push_to_browser("Capturing image, please wait.")
 
         image = capture_image()
         if image is None:
-            speak("Camera error. Please check the camera connection and try again.")
+            push_to_browser("Camera error. Please check the camera connection and try again.")
             return
 
-        speak("Analyzing the image.")
+        push_to_browser("Analyzing the image.")
         try:
             description = ask_gemini(model, image)
             print(f"[GEMINI] {description}")
-            speak(description)
+            push_to_browser(description)
         except Exception as exc:
             print(f"[ERROR] Gemini request failed: {exc}")
-            speak("Sorry, I could not analyze the image. Please check the internet connection.")
+            push_to_browser("Sorry, I could not analyze the image. Please check the internet connection.")
     finally:
         _processing_lock.release()
 
 
 # ── GPIO / input handling ─────────────────────────────────────────────────────
 
-def _make_gpio_callback(model):
-    def _callback(channel):
-        threading.Thread(
-            target=run_pipeline, args=(model,), daemon=True
-        ).start()
-    return _callback
-
-
-def setup_gpio(model):
+def poll_button(model):
+    """Poll the button pin every 50 ms — avoids add_event_detect kernel bugs."""
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.add_event_detect(
-        BUTTON_PIN,
-        GPIO.FALLING,
-        callback=_make_gpio_callback(model),
-        bouncetime=600,           # ms — ignore bounces shorter than this
-    )
-    print(f"[GPIO] Ready. Listening on BCM pin {BUTTON_PIN}. Press button to capture.")
+    print(f"[GPIO] Polling BCM pin {BUTTON_PIN}. Press button to capture.")
+
+    last_state = GPIO.HIGH
+    debounce_until = 0.0
+
+    while True:
+        state = GPIO.input(BUTTON_PIN)
+        now = time.monotonic()
+        # Detect falling edge (HIGH → LOW) outside debounce window
+        if last_state == GPIO.HIGH and state == GPIO.LOW and now >= debounce_until:
+            debounce_until = now + 0.6          # 600 ms debounce
+            threading.Thread(
+                target=run_pipeline, args=(model,), daemon=True
+            ).start()
+        last_state = state
+        time.sleep(0.05)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     model = _init_gemini()
-    _init_audio()
 
     if _GPIO_AVAILABLE:
-        setup_gpio(model)
-        print("[INFO] Running. Press Ctrl+C to exit.")
         try:
-            while True:
-                time.sleep(0.1)
+            poll_button(model)          # blocks here; exits on Ctrl+C
         except KeyboardInterrupt:
             print("\n[INFO] Shutting down.")
         finally:
             GPIO.cleanup()
-            pygame.mixer.quit()
     else:
         # Non-RPi test mode: press Enter to simulate a button press
         print("[TEST] Press Enter to simulate a button press. Ctrl+C to quit.\n")
@@ -177,8 +159,6 @@ def main():
                 ).start()
         except KeyboardInterrupt:
             print("\n[INFO] Shutting down.")
-        finally:
-            pygame.mixer.quit()
 
 
 if __name__ == "__main__":

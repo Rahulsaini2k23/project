@@ -1,17 +1,31 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 from datetime import datetime
 import subprocess
+import threading
+import queue
+import json
 from gps_reader import start_gps, get_current_gps
 import cv2
-from flask import Response
 
 
 
 app = Flask(__name__)
 start_gps()
 
-# Add after existing globals (after start_gps())
 camera = None
+
+# ── Vision SSE pub-sub ────────────────────────────────────────────────────────
+_vision_subscribers: list[queue.Queue] = []
+_vision_lock = threading.Lock()
+
+
+def _broadcast_vision(text: str):
+    """Push a Gemini result to every connected browser tab."""
+    payload = json.dumps({"text": text})
+    with _vision_lock:
+        for q in _vision_subscribers:
+            q.put(payload)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 DESTINATIONS = {
@@ -122,6 +136,18 @@ def video_feed():
         generate_frames(),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
+
+@app.route('/capture')
+def capture():
+    """Return a single JPEG frame from the camera (used by button_vision.py)."""
+    cam = get_camera()
+    ok, frame = cam.read()
+    if not ok:
+        return Response("Camera error", status=503)
+    ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ret:
+        return Response("Encode error", status=500)
+    return Response(buf.tobytes(), mimetype='image/jpeg')
 
 def resolve_destination(spoken_text):
     query = spoken_text.lower().strip()
@@ -234,5 +260,42 @@ def guardian_location():
         "battery":    battery
     })
 
+@app.route("/vision/result", methods=["POST"])
+def vision_result():
+    """button_vision.py POSTs the Gemini description here."""
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "").strip()
+    if text:
+        _broadcast_vision(text)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/vision/stream")
+def vision_stream():
+    """Browser connects here via EventSource to receive Gemini descriptions."""
+    q: queue.Queue = queue.Queue()
+    with _vision_lock:
+        _vision_subscribers.append(q)
+
+    def generate():
+        try:
+            while True:
+                try:
+                    payload = q.get(timeout=25)
+                    yield f"data: {payload}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"   # prevents proxy timeouts
+        finally:
+            with _vision_lock:
+                if q in _vision_subscribers:
+                    _vision_subscribers.remove(q)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
